@@ -2,10 +2,8 @@ import math
 import time
 import Plotter
 import numpy as np
+import scipy.linalg as sp
 import Hamiltonian_Constructor as HC
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from matplotlib.collections import LineCollection
 from tqdm import tqdm
 from parameters import *
 
@@ -29,13 +27,13 @@ def find_magic_field(field_val, eig_val, s1, s2):
     return mag_cond
 
 
-# Get the eigenvalues of a given Hamiltonian
+# Get the eigenvalues of a given Hamiltonian.  This is the part of the code where the imaginary part turns into B.
 def get_unsorted_eigenvalues(h):
     xval = []
     eigs = []
     for B in tqdm(np.linspace(start_field, end_field, num_points), ascii=True):
         xval.append(B)
-        step_eig = np.linalg.eigvals(h.real + h.imag * B)
+        step_eig = sp.eigvalsh(h.real + h.imag * B)
         eigs.append(step_eig)
     return xval, eigs
 
@@ -65,8 +63,13 @@ def sort_eigenvalues(eig_val):
     return np.transpose(eig_val)
 
 
-# Print with a delay before and after to "fix" tqdm printing
 def print_delayed(string):
+    """
+    Print with a delay before and after to "fix" tqdm printing.
+
+    :param string:  String to print.
+    :return:        None
+    """
     time.sleep(0.01)
     print string
     time.sleep(0.01)
@@ -74,52 +77,14 @@ def print_delayed(string):
 state_list = HC.state_list
 num_states = len(state_list)
 
-# Construct H_HFS, the Hamiltonian for the hyperfine splitting.
+# Construct and diagonalize this Hamiltonian.
 print_delayed("Constructing Hamiltonian...")
-H_HFS = HC.get_hfs_hamiltonian()
-H_Z = HC.get_zeeman_hamiltonian()
-if pi_polarization:
-    H_dress = HC.get_microwave_hamiltonian(intensity, 0)
-else:
-    H_dress = (HC.get_microwave_hamiltonian(intensity, 1) + HC.get_microwave_hamiltonian(intensity, -1)) / math.sqrt(2)
-# rabi = field / (2 * math.pi * hbar) * bohr_magneton * mat_elem[2, 6]
-# print "Rabi frequency is " + str(rabi) + " Hz"
-
-# Construct the Floquet matrix (H_f) by first constructing a structured mask, then replacing elements in the mask with
-# the actual sub-matrices
-cpl = 1 * (np.eye(2*photon_count + 1, k=1) + np.eye(2*photon_count + 1, k=-1))
-ph = 1j * np.diagflat(range(-photon_count, photon_count + 1))
-hfs = 10 * np.eye(2*photon_count + 1)
-mask = cpl + ph + hfs
-H_f = []
+H = HC.get_floquet_hamiltonian(photon_count, True)
+H0 = HC.get_undressed_hamiltonian()
 total_states = (2*photon_count + 1) * num_states
-for a in range(2*photon_count + 1):
-    row = []
-    for b in range(2*photon_count + 1):
-        tmp = np.zeros((num_states, num_states))
-        val = mask[a][b]
-        if val.real == 1:
-            tmp = H_dress
-        elif val.real == 10:
-            tmp = H_HFS + H_Z
-        if val.imag != 0:
-            tmp += np.eye(num_states) * val.imag * (hbar * 2 * math.pi * field_freq)
-        if b == 0:
-            row = tmp
-        else:
-            row = np.concatenate((row, tmp), axis=1)
-    if a == 0:
-        H_f = row
-    else:
-        H_f = np.concatenate((H_f, row), axis=0)
 
-# Diagonalize this Hamiltonian.  Note that the values are theoretically strictly real, but the actual values are
-# encoded such that real parts are B field-independent and imaginary parts are linearly dependent on the field.
-H = H_f
-H0 = H_HFS + H_Z      # Unshifted Hamiltonian
-
-# Get all the eigenvalues as a function of the magnetic field.  Note the real/imag encoding stated above.
-print_delayed("Diagonalizing Floquet Hamiltonian (size = " + str(len(H)) + ")...")
+# Get all the eigenvalues as a function of the magnetic field.
+print_delayed("Diagonalizing Floquet Hamiltonian (size = " + str(total_states) + ")...")
 xval, all_eigs = get_unsorted_eigenvalues(H)
 
 # Properly reorder the eigenvalues by calculating the current slope and picking the next point for each energy level
@@ -171,7 +136,6 @@ for i in range(len(eigs)):
 print "Searching for magic fields..."
 l1 = {i for i in range(num_states) if state_list[i].M >= 0}
 # mag_shifted = find_magic_field(pltX, eigs, s1, s2)
-# print "Shifted conditions:   " + str(mag_shifted)
 mag_list_unshifted = []
 mag_list_shifted = []
 for a in l1:
@@ -182,47 +146,14 @@ for a in l1:
         mag_unshifted = find_magic_field(pltX, eigs0, a, b)
         mag_shifted = find_magic_field(pltX, eigs, a, b)
         if mag_unshifted != [] and a < b:
-            # print " " + str(a) + " to " + str(b) + ": " + str(mag_unshifted)
             mag_list_unshifted.append([(a, b), mag_unshifted])
         if mag_shifted != [] and a < b:
-            # print "*" + str(a) + " to " + str(b) + ": " + str(mag_shifted)
             mag_list_shifted.append([(a, b), mag_shifted])
 # Test : |4,1> (5) and |5,1> (15): 231 G -> 4.231 GHz, slope 2.03 MHz/G
 
-# Animated Zeeman plotting code
-fig, axes = plt.subplots()
-axes.set_xlim((-11.5, 11.5))
-axes.set_ylim((-260, 320))
-plt.title("Holmium ground hyperfine states")
-plt.xlabel("$M_F$")
-plt.ylabel("Energy (GHz)")
-label = axes.text(-11, 290, '', fontsize=12)
-
-
-def animate(i):
-    state_lines = []
-    for ind in range(len(eigs)):
-        state = state_list[ind]
-        en = eigs[ind][i] / (hbar * 1e9 * 2 * math.pi)
-        state_lines.append([(state.M - 0.4, en), (state.M + 0.4, en)])
-    col = LineCollection(state_lines, linestyles='solid')
-    axes.add_collection(col)
-    dB = (end_field - start_field) / num_points
-    label.set_text("B = " + str(1e4 * (start_field + i*dB)) + " G")
-    return col, label
-
-ani = animation.FuncAnimation(fig, animate, frames=num_points, interval=6000/num_points, blit=True)
-plt.show()
-
-# Magic field plotting code
-# Plotter.plot_magic_fields("Unshifted Magic Fields", state_list, mag_list_unshifted)
+# Various plotting examples
+# Plotter.plot_animated_zeeman(state_list, eigs)
+Plotter.plot_magic_fields("Unshifted Magic Fields", state_list, mag_list_unshifted)
 # Plotter.plot_magic_fields(title, state_list, mag_list_shifted)
-
-s1 = 19
-s2 = 31
-
-# Breit-Rabi plotting code
 # Plotter.plot_breit_rabi("Holmium Breit-Rabi Diagram", xval, all_eigs, highlight=[s1, s2])
-
-# Energy gap plotting code
 # Plotter.plot_gap(title, xval, eigs, s1, s2, other_eig=eigs0)
